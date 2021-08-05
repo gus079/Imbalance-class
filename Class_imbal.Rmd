@@ -1,0 +1,152 @@
+---
+title: "Imbalance Class"
+author: "GS"
+date: "4/8/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, cache.lazy = FALSE, 
+                      warning = FALSE, message = FALSE, comment = "",
+                      fig.width = 8, fig.height = 5, dpi = 180)
+
+library(tidyverse)
+library(tidymodels)
+library(GGally)
+library(tinytex)
+theme_set(theme_bw())
+
+getwd()
+```
+
+## Load datasets
+```{r}
+train_raw <- read_csv("train.csv", guess_max = 1e5) %>% 
+  mutate(damaged = if_else(damaged > 0, "damaged", "no damaged"))
+
+test_raw <- read_csv("test.csv", guess_max = 1e5)
+```
+
+## EDA
+```{r}
+glimpse(train_raw)
+```
+
+```{r}
+train_raw %>% 
+  select(damaged, incident_year, height, speed, distance) %>% 
+  ggpairs(columns = 2:5, aes(color = damaged, alpha = .5))
+```
+
+```{r}
+  train_raw %>% 
+  select(damaged, precipitation, visibility, engine_type,
+         flight_impact, flight_phase, species_quantity) %>%
+  pivot_longer(precipitation : species_quantity) %>% 
+  ggplot(aes(y = value, fill = damaged)) + 
+  geom_bar(position = "fill") + 
+  facet_wrap(vars(name), scales = "free") + 
+  labs(x = NULL, y = NULL, fill = NULL)
+```
+
+```{r}
+bird_df <- train_raw %>% 
+  select(damaged, flight_impact, precipitation, visibility, flight_phase,
+         engines, incident_year, incident_month, species_id, engine_type,
+         aircraft_model, species_quantity, height, speed)
+```
+
+## Build model 
+
+```{r}
+set.seed(123)
+bird_folds <- vfold_cv(train_raw, 
+                       v = 5, 
+                       strata = damaged)
+
+bird_metrics <- metric_set(mn_log_loss, accuracy, 
+                           sensitivity, specificity)
+```
+
+```{r}
+bird_rec <- recipe(damaged ~ ., data = bird_df) %>% 
+  step_novel(all_nominal_predictors()) %>% 
+  step_other(all_nominal_predictors(), threshold = 0.01) %>% 
+  step_unknown(all_nominal_predictors()) %>% 
+  step_impute_median(all_numeric_predictors()) %>% 
+  step_zv(all_predictors())
+
+bird_rec
+
+bird_rec %>% prep() %>% juice()
+
+bird_df %>% count(damaged) # imbalance
+```
+
+```{r}
+library(baguette)
+
+bag_spec <- 
+  bag_tree(min_n = 10) %>% 
+  set_engine("rpart", times = 25) %>% 
+  set_mode("classification")
+
+bag_spec
+```
+
+```{r}
+imb_wf <- 
+  workflow() %>% 
+  add_recipe(bird_rec) %>% 
+  add_model(bag_spec)
+
+imb_wf
+
+fit(imb_wf, data = bird_df)
+```
+
+## Resample & compare models
+
+```{r}
+doParallel::registerDoParallel()
+set.seed(123)
+
+imb_res <- fit_resamples(
+  imb_wf,
+  resamples = bird_folds, 
+  metrics = bird_metrics
+)
+
+imb_res
+collect_metrics(imb_res)
+
+```
+
+```{r}
+library(themis)
+
+bal_rec <- 
+  bird_rec %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_smote(damaged)
+
+bal_rec
+bal_rec %>% prep() %>%  juice()
+bal_rec %>% prep() %>%  juice() %>% count(damaged) # balanced
+
+bal_wf <- 
+  workflow() %>% 
+  add_recipe(bal_rec) %>% 
+  add_model(bag_spec)
+
+set.seed(123)
+
+bal_res <- fit_resamples(
+  bal_wf,
+  resamples = bird_folds, 
+  metrics = bird_metrics
+)
+
+bal_res
+collect_metrics(bal_res)
